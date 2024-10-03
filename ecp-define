@@ -1,0 +1,423 @@
+#!/bin/bash
+
+######################################################################
+
+basis_library_url=https://pseudopotentiallibrary.org/recipes
+
+######################################################################
+
+function read_input {
+    basis="aug-cc-pVDZ"
+    symmetry="off"
+    freeze=""
+    charge="0"
+    ri="on"
+    rimem="5000"
+    cc="off"
+    ccmethod="mp2"
+    turbodir="$TURBODIR"
+    bse=$(which bse)
+    verbose="off"
+    while [ "$1" != "" ]; do
+	if [ "$1" == "-b" ] || [ "$1" == "--basis" ]; then
+	    shift
+	    basis="$1"
+	elif [ "$1" == "-s" ]; then
+	    symmetry="on"
+	elif [ "$1" == "-f" ] || [ "$1" == "--freeze" ]; then
+	    shift
+	    freeze="$1"
+	elif [ "$1" == "-c" ] || [ "$1" == "--charge" ]; then
+	    shift
+	    charge="$1"
+	elif [ "$1" == "--no-ri" ]; then
+	    ri="off"
+	elif [ "$1" == "--ri-mem" ]; then
+	    shift
+	    rimem="$1"
+	elif [ "$1" == "-cc" ]; then
+	    cc="on"
+	    shift
+	    ccmethod="$1"
+	elif [ "$1" == "--turbodir" ]; then
+	    shift
+	    turbodir="$1"
+	elif [ "$1" == "--bse-exec" ]; then
+	    shift
+	    bse="$1"
+	elif [ "$1" == "-v" ] || [ "$1" == "--verbose" ]; then
+	    verbose="on"
+	elif [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
+	    print_help
+	    exit 0
+	fi
+	shift
+    done
+    }
+
+
+function print_help {
+    echo
+    echo "       +------------------------+"
+    echo "       |        ecp-define      |"
+    echo "       +------------------------+"
+    echo
+    echo "Driver to set turbomole input"
+    echo "with basis sets from "
+    echo "https://pseudopotentiallibrary.org/"
+    echo
+    echo "Author: E. Fabiano (eduardo.fabiano@cnr.it)"
+    echo "Date: Oct. 2024"
+    echo
+    echo "USAGE:"
+    echo "  ecp-define [options]"
+    echo
+    echo "OPTIONS:"
+    echo "  -b or --basis <string>    name of the basis set to be used:"
+    echo "                            (default: aug-cc-pVDZ)"
+    echo "  -s                        use symmetry (default: do not use)"
+    echo "  -f or --freeze \"<string>\" use <string> to set the frozen atoms"
+    echo "                            (default: no freeze)"
+    echo "  -c or --charge <number>   total charge of the system"
+    echo "                            (default: 0)"
+    echo "  --no-ri                   turn off RI approximation"
+    echo "                            (default: on)"
+    echo "  --ri-mem <number>         set memory for RI"
+    echo "                            (default: 5000)"
+    echo "  -cc <string>              set correlated calculations:" 
+    echo "                               mp2, cc2, mp3, mp4, ccsd(t)"
+    echo "                            (default: do not set)"
+    echo "  --turbodir                set TURBODIR (default: from system value)"
+    echo "  --bse-exec                bse executable (default: which bse)"
+    echo "  -v or --verbose           print additional output"
+    echo "                            (default: do not print)"
+    echo "  -h or --help              print this help"
+    echo
+}
+
+
+function print_options {
+    echo
+    echo "       +------------------------+"
+    echo "       |        ecp-define      |"
+    echo "       +------------------------+"
+    echo
+    echo "Driver to set turbomole input"
+    echo "with basis sets from "
+    echo "https://pseudopotentiallibrary.org/"
+    echo
+    echo "Author: E. Fabiano (eduardo.fabiano@cnr.it)"
+    echo "Date: Oct. 2024"
+    echo
+    echo "OPTIONS:"
+    echo "symmetry = $symmetry"
+    echo " basis = $basis"
+    echo " freeze = $freeze"
+    echo " total charge = $charge"
+    echo " RI = $ri"
+    if [ "$ri" == "on" ]; then
+	echo " RI memory = $rimem"
+    fi
+    echo " cbas = $cc"
+    echo
+    echo "TURBODIR: $turbodir"
+    echo "bse executable: $bse"
+    echo
+}
+
+
+function check_turbodir {
+    if [ ! -d "$turbodir" ]; then
+	echo "ERROR!"
+	echo "$turbodir is not a valid value for TURBODIR"
+	echo
+	exit 1
+    fi
+    if [ ! -f "$turbodir/scripts/sysname" ]; then
+	echo "ERROR!"
+	echo "sysname script not found in $turbodir/scripts"
+	echo
+	exit 1
+    fi
+    sname=$($turbodir/scripts/sysname -s)
+    define="$turbodir/bin/${sname}/define"
+    if [ ! -f "$define" ]; then
+	echo "ERROR!"
+	echo "define program not found in $turbodir/bin/${sname}"
+	echo
+	exit 1
+    fi
+    export TURBODIR="$turbodir"
+    export PATH="$turbodir/scripts:$turbodir/bin/${sname}:$PATH"
+}
+
+
+function check_bse {
+    if [ ! -f "$bse" ]; then
+	echo "ERROR!"
+	echo "$bse is not a valid executable for the bse program"
+	echo
+	exit 1
+    fi
+}
+
+
+function detect_atom_types {
+#   create a fake control file just to run sdg
+    echo "\$coord  file=coord" > control
+    echo "\$end" >> control
+    coords=$(sdg coord)
+    rm control > /dev/null
+#    
+    natoms=$(echo "$coords" | wc -l)
+    natoms=$(echo "$natoms - 1" | bc )
+    atom_list=""
+    ish="no"
+    for i in $(seq $natoms); do
+	j=$(echo "$i + 1" | bc)
+	atom=$(echo "$coords" | head -n $j | tail -n 1 | awk '{print $4}')
+	if [ "$atom" == "h" ]; then
+	    ish="yes"
+	else
+	    ch="0"
+	    for at in $atom_list; do
+		if [ "$at" == "$atom" ]; then
+		    ch="1"
+		fi
+	    done
+	    if [ "$ch" == "0" ]; then
+		atom_list=$(echo "$atom_list $atom")
+	    fi
+	fi
+    done
+}
+
+
+function download_basis_files {
+    if [ "$verbose" == "on" ]; then
+	logfile=/dev/stdout
+    else
+	logfile=/dev/null
+    fi
+#    
+    for at in $atom_list; do
+#       basis files	
+	cat="$(tr '[:lower:]' '[:upper:]' <<< ${at:0:1})${at:1}"
+	curl ${basis_library_url}/$cat/ccECP/${cat}.${basis}.gaussian -o tmpbas >& /dev/null
+	$bse convert-basis --in-fmt gaussian94 --out-fmt turbomole tmpbas ${at}_${basis} >& $logfile; rm tmpbas 
+	sed s/unknown_basis/ccecp-${basis}/g ${at}_${basis} > tmp; mv tmp ${at}_${basis}
+#       ecps
+	cat="$(tr '[:lower:]' '[:upper:]' <<< ${at:0:1})${at:1}"
+	curl ${basis_library_url}/$cat/ccECP/${cat}.ccECP.gaussian -o tmpbas >& /dev/null
+	$bse convert-basis --in-fmt gaussian94 --out-fmt turbomole tmpbas ${at}_ecp >& $logfile; rm tmpbas 
+	sed s/unknown_basis/ccecp-${basis}/g ${at}_ecp > tmp; mv tmp ${at}_ecp
+    done
+    if [ "$ish" == "yes" ]; then
+	bse get-basis $basis turbomole --elements h --noheader > tmp
+	lin=$(wc -l tmp | awk '{print $1}'); nlin=$(echo "$lin - 1" | bc)
+	head -n $nlin tmp > h_${basis}
+	rm tmp
+    fi
+    }
+
+
+function create_auxbasis {
+    if [ "$verbose" == "on" ]; then
+	logfile=/dev/stdout
+    else
+	logfile=/dev/null
+    fi
+# create jbasis
+    if [ "$ri" == "on" ]; then
+	for at in $atom_list; do
+	bse autoabs-basis --in-fmt turbomole --out-fmt turbomole ${at}_${basis} ${at}_${basis}_jbas >& $logfile
+	sed s/unknown_basis_autoabs/ccecp-${basis}/g ${at}_${basis}_jbas > tmp; mv tmp ${at}_${basis}_jbas
+	done
+	if [ "$ish" == "yes" ]; then
+	    bse autoabs-basis --in-fmt turbomole --out-fmt turbomole h_${basis} h_${basis}_jbas >& $logfile
+	    sed s/unknown_basis_autoabs/own-${basis}/g h_${basis}_jbas > tmp; mv tmp h_${basis}_jbas
+	fi
+    fi
+# create cbasis
+    if [ "$cc" == "on" ]; then
+	for at in $atom_list; do
+	    bse autoaux-basis --in-fmt turbomole --out-fmt turbomole ${at}_${basis} ${at}_${basis}_cbas >& $logfile
+	    sed s/unknown_basis_autoaux/ccecp-${basis}/g ${at}_${basis}_cbas > tmp; mv tmp ${at}_${basis}_cbas
+	done
+	if [ "$ish" == "yes" ]; then
+	    bse autoaux-basis --in-fmt turbomole --out-fmt turbomole h_${basis} h_${basis}_cbas >& $logfile
+	    sed s/unknown_basis_autoaux/own-${basis}/g h_${basis}_cbas > tmp; mv tmp h_${basis}_cbas
+	fi
+    fi
+}
+
+
+function create_basis_library {
+    rm -r NEWBASISLIB >& /dev/null
+    mkdir NEWBASISLIB
+    if [ "$ish" == "yes" ]; then
+	lista="$atom_list h"
+    else
+	lista="$atom_list"
+    fi
+    for at in $lista; do
+	lin=$(wc -l ${at}_${basis} | awk '{print $1}'); nlin=$(echo "$lin - 1" | bc)
+	head -n $nlin ${at}_${basis} > ${at}_tmpbas
+	rm ${at}_${basis}
+	if [ -f ${at}_ecp ]; then
+	    lin=$(wc -l ${at}_ecp | awk '{print $1}'); nlin=$(echo "$lin - 1" | bc); nnlin=$(echo "$nlin - 2" | bc)
+	    head -n $nlin ${at}_ecp | tail -n $nnlin >> ${at}_tmpbas
+	    rm ${at}_ecp
+	fi
+	if [ "$ri" == "on" ]; then
+	    lin=$(wc -l ${at}_${basis}_jbas | awk '{print $1}'); nlin=$(echo "$lin - 1" | bc)
+	    head -n $nlin ${at}_${basis}_jbas >> ${at}_tmpbas
+	    rm ${at}_${basis}_jbas
+	fi
+	if [ "$cc" == "on" ]; then
+	    lin=$(wc -l ${at}_${basis}_cbas | awk '{print $1}'); nlin=$(echo "$lin - 1" | bc)
+	    head -n $nlin ${at}_${basis}_cbas >> ${at}_tmpbas
+	    rm ${at}_${basis}_cbas
+	fi
+	echo "\$end" >> ${at}_tmpbas
+	mv ${at}_tmpbas NEWBASISLIB/${at}
+    done
+    }
+
+
+function write_define_input {
+    rm .definerc >& /dev/null
+    here=$(pwd)
+    echo "basis=${here}/NEWBASISLIB" > .definerc
+#
+    echo "" > def.in
+    echo "" >> def.in
+    echo "a coord" >> def.in
+    if [ "$symmetry" == "on" ]; then
+	echo "desy" >> def.in
+    fi
+    echo "*" >> def.in
+    echo "no" >> def.in
+    echo "lib" >> def.in
+    echo "3" >> def.in
+    for at in $atom_list; do
+	echo "b \"$at\" ccecp-${basis}" >> def.in
+	echo "ecp \"$at\" ccecp-${basis}-ecp" >> def.in
+    done
+    if [ "$ish" == "yes" ]; then
+	echo "b \"h\" $basis" >> def.in
+    fi
+    if [ "$freeze" != "" ]; then
+	echo "c $freeze 0" >> def.in
+    fi
+    echo "*" >> def.in
+    echo "eht" >> def.in
+    echo "" >> def.in
+    echo "$charge" >> def.in
+    echo "" >> def.in
+    echo "" >> def.in
+    echo "" >> def.in
+    if [ "$ri" == "on" ]; then
+	echo "ri" >> def.in
+	echo "on" >> def.in
+	echo "m $rimem" >> def.in
+	echo "jbas" >> def.in
+	echo "lib" >> def.in
+	echo "3" >> def.in
+	for at in $atom_list; do
+	    echo "b \"$at\" ccecp-${basis}" >> def.in
+	done
+	if [ "$ish" == "yes" ]; then
+	    echo "b \"h\" own-$basis" >> def.in
+	fi
+	echo "*" >> def.in
+	echo "" >> def.in
+	echo "marij" >> def.in
+	echo "" >> def.in
+    fi
+    if [ "$cc" == "on" ]; then
+	echo "cc" >> def.in
+	echo "cbas" >> def.in
+	for at in $atom_list; do
+	    echo "file NEWBASISLIB/$at" >> def.in
+	done
+	if [ "$ish" == "yes" ]; then
+	    echo "lib" >> def.in
+	    echo "3" >> def.in
+	    echo "b \"h\" own-$basis" >> def.in	    
+	fi
+	echo "*" >> def.in
+	echo "*" >> def.in
+    fi
+    echo "*" >> def.in
+    
+}
+
+
+function run_define {
+    $define < def.in >& /dev/null
+    rm def.in
+    if [ "$cc" == "on" ]; then
+	kdg end
+	echo "\$ricc2" >> control
+	echo "  $ccmethod" >> control
+	echo "\$end" >> control
+    fi
+}
+
+######################################################################
+
+read_input "$@"
+if [ "$verbose" == "on" ]; then
+    print_options
+fi
+
+
+check_turbodir
+check_bse
+
+
+detect_atom_types
+
+
+if [ "$verbose" == "on" ]; then
+    echo "Downloading basis sets $basis and ECPs for atoms:"
+    echo -n "$atom_list"
+    if [ "$ish" == "yes" ]; then
+	echo " h"
+    else
+	echo ""
+    fi
+fi
+download_basis_files
+
+
+if [ "$ri" == "on" ] || [ "$cc" == "on" ]; then
+    if [ "$verbose" == "on" ]; then
+	echo 
+	echo "Creating auxiliary basis sets"
+    fi
+    create_auxbasis
+fi
+
+
+if [ "$verbose" == "on" ]; then
+    echo
+    echo "Creating new basis set library dir"
+fi
+create_basis_library
+
+
+if [ "$verbose" == "on" ]; then
+    echo
+    echo "Running define..."
+fi
+write_define_input
+run_define
+
+
+if [ "$verbose" == "on" ]; then
+    echo
+    echo "DONE!"
+    echo
+fi
