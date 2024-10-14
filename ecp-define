@@ -285,6 +285,32 @@ function create_basis_library {
     }
 
 
+function set_active_atoms {
+    atom_type="$1"
+    active_atom_list=""
+    for i in $(seq $natoms); do
+        j=$(echo "$i + 1" | bc)
+        atom=$(echo "$coords" | head -n $j | tail -n 1 | awk '{print $4}')
+	if [ "$atom" == "$atom_type" ]; then
+	    ch=0
+	    freeze_list=$(echo "$freeze" | sed s/,/" "/g)
+	    for k in $freeze_list; do
+		if [ "$k" == "$i" ]; then
+		    ch=1
+		    break
+		fi
+	    done
+	    if [ "$ch" == "0" ]; then
+		active_atom_list=$(echo "$active_atom_list,$i")
+	    fi
+	fi
+    done
+    if [ "$active_atom_list" != "" ]; then
+	active_atom_list="${active_atom_list:1}"
+    fi
+}
+
+
 function write_define_input {
     rm .definerc >& /dev/null
     here=$(pwd)
@@ -302,7 +328,10 @@ function write_define_input {
     echo "3" >> def.in
     for at in $atom_list; do
 	echo "b \"$at\" ccecp-${basis}" >> def.in
-	echo "ecp \"$at\" ccecp-${basis}-ecp" >> def.in
+	set_active_atoms "$at"
+	if [ "$active_atom_list" != "" ]; then
+	    echo "ecp $active_atom_list ccecp-${basis}-ecp" >> def.in
+	fi
     done
     if [ "$ish" == "yes" ]; then
 	echo "b \"h\" $basis" >> def.in
@@ -311,6 +340,7 @@ function write_define_input {
 	echo "c $freeze 0" >> def.in
     fi
     echo "*" >> def.in
+    echo "y" >> def.in
     echo "eht" >> def.in
     echo "" >> def.in
     echo "$charge" >> def.in
